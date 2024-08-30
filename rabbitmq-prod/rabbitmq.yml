@@ -1,0 +1,479 @@
+# Ref:- https://github.com/rabbitmq/diy-kubernetes-examples/blob/master/gke/configmap.yaml
+# Ref:-https://github.com/marcel-dempers/docker-development-youtube-series/tree/master/messaging/rabbitmq
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: production
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: krishna
+  namespace: production
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: krishna-role
+  namespace: production
+rules:
+- apiGroups: ["*"]
+  resources: ["*"]
+  verbs: ["get", "watch", "list", "update", "patch", "deletecollection"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: krishna-rolebinding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: krishna-role
+subjects:
+- kind: ServiceAccount
+  name: krishna
+  namespace: production
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: rabbitmq-config
+  namespace: production
+data:
+  enabled_plugins: |
+    [rabbitmq_amqp1_0,rabbitmq_federation,rabbitmq_federation_management,rabbitmq_management,rabbitmq_mqtt,rabbitmq_peer_discovery_etcd,rabbitmq_peer_discovery_k8s,rabbitmq_prometheus,rabbitmq_shovel,rabbitmq_shovel_management,rabbitmq_stream,rabbitmq_stream_management,rabbitmq_web_mqtt,rabbitmq_web_mqtt_examples,rabbitmq_stomp,rabbitmq_web_stomp,rabbitmq_web_stomp_examples].
+  rabbitmq.conf: |
+    cluster_formation.peer_discovery_backend = rabbit_peer_discovery_k8s
+    cluster_formation.k8s.host = kubernetes.default.svc.cluster.local
+    cluster_formation.k8s.hostname_suffix = .rabbitmq-internal.production.svc.cluster.local
+    cluster_formation.k8s.address_type = hostname
+    cluster_formation.k8s.service_name = rabbitmq-internal
+    cluster_formation.node_cleanup.only_log_warning = true
+    cluster_formation.node_cleanup.interval = 60
+    cluster_partition_handling = autoheal
+    queue_master_locator=min-masters
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: rabbitmq
+  namespace: production
+type: Opaque
+data:
+  RABBITMQ-USERNAME: Ymx1ZWVk #echo -n "blueed" | base64
+  RABBITMQ-PASSWORD: Ymx1ZWVkUHJvZA== #echo -n "blueedProd" | base64
+  # echo -n ADZOMBEQUWULYVODGOFQ | base64
+  RABBITMQ_ERLANG_COOKIE: QURaT01CRVFVV1VMWVZPREdPRlE=
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rabbitmq
+  namespace: production
+  annotations:
+    prometheus_io_scrape: "true"
+  labels:
+    app: rabbitmq
+spec:
+  selector:
+    app: rabbitmq
+  type: ClusterIP # ClusterIP, NodePort, LoadBalancer
+  ports:
+  - name: amqps-service
+    protocol: TCP
+    port: 5671
+    targetPort: amqps-port
+    # nodePort: 30015
+  - name: amqp-service
+    protocol: TCP
+    port: 5672
+    targetPort: amqp-port
+    # nodePort: 30016
+  - name: ui-service
+    protocol: TCP
+    port: 15672
+    targetPort: rabbitmq-ui
+    # nodePort: 30017
+  - name: ws-service
+    protocol: TCP
+    port: 15674
+    targetPort: rabbitmq-ws
+    # nodePort: 30018
+  - name: discovery
+    protocol: TCP
+    port: 4369
+    targetPort: discovery
+    # nodePort: 30024
+  - name: prometheus
+    protocol: TCP
+    port: 15692
+    targetPort: prometheus
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rabbitmq-internal
+  namespace: production
+  labels:
+    app: rabbitmq
+spec:
+  selector:
+    app: rabbitmq
+  # type: ClusterIP # ClusterIP, NodePort, None
+  clusterIP: None
+  ports:
+  - name: amqps-service
+    protocol: TCP
+    port: 5671
+    targetPort: amqps-port
+  - name: amqp-service
+    protocol: TCP
+    port: 5672
+    targetPort: amqp-port
+  - name: ui-service
+    protocol: TCP
+    port: 15672
+    targetPort: rabbitmq-ui
+  - name: ws-service
+    protocol: TCP
+    port: 15674
+    targetPort: rabbitmq-ws
+  - name: discovery
+    protocol: TCP
+    port: 4369
+    targetPort: discovery
+  - name: prometheus
+    protocol: TCP
+    port: 15692
+    targetPort: prometheus
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: rabbitmq
+  namespace: production
+  labels:
+    app: rabbitmq
+spec:
+  replicas: 2
+  revisionHistoryLimit: 3
+  serviceName: "rabbitmq-internal"
+  selector:
+    matchLabels:
+      app: rabbitmq
+  volumeClaimTemplates:
+  - metadata:
+      name: rabbitmq
+      namespace: production
+    spec:
+      storageClassName: standard-xxrwo # standard-xxrwo nfs-csi
+      accessModes:
+      - ReadWriteOnce
+      resources:
+        requests:
+          storage: "3Gi"
+  template:
+    metadata:
+      labels:
+        app: rabbitmq
+    spec:
+      terminationGracePeriodSeconds: 10
+      imagePullSecrets:
+      - name: gitlab-registry
+      initContainers:
+      - name: "rabbitmq-config"
+        image: busybox:1.32.0
+        volumeMounts:
+        - name: rabbitmq-config
+          mountPath: /tmp/rabbitmq
+        - name: rabbitmq-config-rw
+          mountPath: /etc/rabbitmq
+        command:
+        - sh
+        - -c
+        # the newline is needed since the Docker image entrypoint scripts appends to the config file
+        - cp /tmp/rabbitmq/rabbitmq.conf /etc/rabbitmq/rabbitmq.conf && echo '' >> /etc/rabbitmq/rabbitmq.conf; cp /tmp/rabbitmq/enabled_plugins /etc/rabbitmq/enabled_plugins
+      volumes:
+      - name: rabbitmq-config
+        configMap:
+          name: rabbitmq-config
+          optional: false
+          items:
+          - key: enabled_plugins
+            path: "enabled_plugins"
+          - key: rabbitmq.conf
+            path: "rabbitmq.conf"
+      - name: rabbitmq-config-rw
+        # read-write volume into which to copy the rabbitmq.conf and enabled_plugins files
+        # and Kubernetes Config Maps are mounted as read-only since Kubernetes 1.9.4
+        # this is needed since the docker image writes to the rabbitmq.conf file
+        emptyDir: {}
+      - name: rabbitmq
+        persistentVolumeClaim:
+          claimName: rabbitmq
+      serviceAccount: krishna
+      # The Docker image runs as the `rabbitmq` user with uid 999 
+      # and writes to the `rabbitmq.conf` file
+      # The security context is needed since the image needs
+      # permission to write to this file. Without the security 
+      # context, `rabbitmq.conf` is owned by root and inaccessible
+      # by the `rabbitmq` user
+      securityContext:
+        fsGroup: 999
+        runAsUser: 999
+        runAsGroup: 999
+      restartPolicy: Always
+      containers:
+      - name: rabbitmq
+        # Community Docker Image
+        image: rabbitmq:3.11.23-management
+        imagePullPolicy: "IfNotPresent"
+        volumeMounts:
+        # mounting rabbitmq.conf and enabled_plugins
+        # this should have writeable access, this might be a problem
+        - name: rabbitmq-config-rw
+          mountPath: "/etc/rabbitmq"
+          # mountPath: "/etc/rabbitmq/conf.d/"
+        # rabbitmq data directory
+        - name: rabbitmq
+          mountPath: "/var/lib/rabbitmq/mnesia"
+        envFrom:
+        - secretRef:
+            name: prod-frontend-env
+        env:
+        - name: TZ
+          value: Asia/Kolkata
+        - name: HOSTNAME
+          valueFrom:
+            fieldRef:
+              apiVersion: v1
+              fieldPath: metadata.name
+        - name: NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: RABBITMQ_NODENAME
+          value: "rabbit@$(HOSTNAME).rabbitmq-internal.$(NAMESPACE).svc.cluster.local"
+        - name: RABBITMQ_USE_LONGNAME
+          value: "true"
+        - name: K8S_SERVICE_NAME
+          value: "rabbitmq-internal"
+        - name: RABBITMQ_DEFAULT_USER
+          valueFrom:
+            secretKeyRef:
+              name: rabbitmq
+              key: RABBITMQ-USERNAME
+        - name: RABBITMQ_DEFAULT_PASS
+          valueFrom:
+            secretKeyRef:
+              name: rabbitmq
+              key: RABBITMQ-PASSWORD
+        - name: RABBITMQ_ERLANG_COOKIE
+          valueFrom:
+            secretKeyRef:
+              name: rabbitmq
+              key: RABBITMQ_ERLANG_COOKIE
+        resources:
+          limits:
+            cpu: "250m"
+            memory: "2Gi"
+          requests:
+            cpu: "250m"
+            memory: "2Gi"
+        livenessProbe:
+          tcpSocket:
+            port: 15674
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 10
+          successThreshold: 1
+          failureThreshold: 2
+        readinessProbe:
+          tcpSocket:
+            port: 15674
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 10
+          successThreshold: 1
+          failureThreshold: 2
+        ports:
+        - name: prometheus
+          containerPort: 15692
+        - name: amqps-port
+          containerPort: 5671
+        - name: amqp-port
+          containerPort: 5672
+        - name: rabbitmq-ui
+          containerPort: 15672
+        - name: rabbitmq-ws
+          containerPort: 15674
+        - name: discovery
+          containerPort: 4369
+        lifecycle:
+          postStart:
+            exec:
+              command:
+              - /bin/sh
+              - -c
+              - >
+                until rabbitmqctl await_startup; do sleep 5; done && rabbitmqctl --erlang-cookie ${RABBITMQ_ERLANG_COOKIE} set_policy ha-ttl ".*" '{"ha-mode":"exactly", "ha-params":2, "ha-sync-mode":"automatic", "expires":259200000}' --apply-to queues --priority 1
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: rabbitmq
+  namespace: production
+  labels:
+    app: rabbitmq
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: StatefulSet
+    name: rabbitmq
+  minReplicas: 2
+  maxReplicas: 5
+  metrics:
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
+# ---
+# apiVersion: networking.k8s.io/v1
+# kind: NetworkPolicy
+# metadata:
+#   name: rabbitmq
+#   namespace: production
+# spec:
+#   podSelector:
+#     matchLabels:
+#       app: rabbitmq
+#   policyTypes:
+#   - Ingress
+#   - Egress
+#   ingress:
+#   - from:
+#     - namespaceSelector:
+#         matchExpressions:
+#         - key: namespace
+#           operator: In
+#           values: ["production"]
+#     - podSelector:
+#         matchLabels:
+#           app: backend
+#     ports:
+#     - protocol: TCP
+#       port: 8080
+#   - from:
+#     - namespaceSelector:
+#         matchExpressions:
+#         - key: namespace
+#           operator: In
+#           values: ["production"]
+#     - podSelector:
+#         matchLabels:
+#           app: postgres
+#     ports:
+#     - protocol: TCP
+#       port: 5432
+#   - from:
+#     - namespaceSelector:
+#         matchExpressions:
+#         - key: namespace
+#           operator: In
+#           values: ["production"]
+#     - podSelector:
+#         matchLabels:
+#           app: frontend
+#     ports:
+#     - protocol: TCP
+#       port: 8082
+#   - from:
+#     - namespaceSelector:
+#         matchExpressions:
+#         - key: namespace
+#           operator: In
+#           values: ["production"]
+#     - podSelector:
+#         matchLabels:
+#           app: celery
+#   - from:
+#     - namespaceSelector:
+#         matchExpressions:
+#         - key: namespace
+#           operator: In
+#           values: ["production"]
+#     - podSelector:
+#         matchLabels:
+#           app: consumer
+#   egress:
+#   - to:
+#     - namespaceSelector:
+#         matchExpressions:
+#         - key: namespace
+#           operator: In
+#           values: ["production"]
+#     - podSelector:
+#         matchLabels:
+#           app: backend
+#     ports:
+#     - protocol: TCP
+#       port: 8080
+#   - to:
+#     - namespaceSelector:
+#         matchExpressions:
+#         - key: namespace
+#           operator: In
+#           values: ["production"]
+#     - podSelector:
+#         matchLabels:
+#           app: postgres
+#     ports:
+#     - protocol: TCP
+#       port: 5432
+#   - to:
+#     - namespaceSelector:
+#         matchExpressions:
+#         - key: namespace
+#           operator: In
+#           values: ["production"]
+#     - podSelector:
+#         matchLabels:
+#           app: frontend
+#     ports:
+#     - protocol: TCP
+#       port: 8082
+#   - to:
+#     - namespaceSelector:
+#         matchExpressions:
+#         - key: namespace
+#           operator: In
+#           values: ["production"]
+#     - podSelector:
+#         matchLabels:
+#           app: celery
+#   - to:
+#     - namespaceSelector:
+#         matchExpressions:
+#         - key: namespace
+#           operator: In
+#           values: ["production"]
+#     - podSelector:
+#         matchLabels:
+#           app: consumer
+# kind: PersistentVolumeClaim
+# apiVersion: v1
+# metadata:
+#   name: rabbitmq
+#   namespace: production
+#   labels:
+#     app: rabbitmq
+# spec:
+#   storageClassName: standard-rwo
+#   accessModes:
+#   - ReadWriteOnce
+#   resources:
+#     requests:
+#       storage: 5Gi
+# ---
